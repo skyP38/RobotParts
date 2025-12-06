@@ -37,6 +37,11 @@ struct LidarConfig {
 
 class Movement {
 public:
+
+    enum class BugState {
+        GO_TO_GOAL,     // Движение к цели
+        FOLLOW_WALL     // Следование вдоль стены
+    };
     Movement(const LidarConfig& config);
     
     // Основная функция обработки скана
@@ -65,6 +70,9 @@ private:
     LidarConfig config_;
     State state_;
     bool emergency_stop_;
+
+    BugState bug_state_;
+    std::vector<float> last_scan_;  // Для хранения последнего скана
     
     // Для управления состоянием
     int avoidance_counter_;

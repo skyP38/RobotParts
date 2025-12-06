@@ -304,17 +304,141 @@ MotorCommand Movement::handleRotating(const std::vector<LidarPointStatus>& statu
     return generateTrajectoryCommand();
 }
 
+// MotorCommand Movement::generateTrajectoryCommand() {
+//     // Простая траектория - движение вперед
+//     //  TODO: алгоритм жука
+    
+//     static float trajectory_phase = 0.0f;
+//     trajectory_phase += 0.02f; // Обновляем фазу
+    
+//     // Простая синусоидальная траектория
+//     float vy = 0.1f * std::sin(trajectory_phase);
+    
+//     return MotorCommand(config_.base_speed, vy, 0);
+// }
+
 MotorCommand Movement::generateTrajectoryCommand() {
-    // Простая траектория - движение вперед
-    //  TODO: алгоритм жука
+    // Алгоритм жука - следование границе препятствия
+    static BugState bug_state = BugState::GO_TO_GOAL;
+    static float follow_wall_distance = 0.5f;  // Дистанция следования вдоль стены
+    static float last_obstacle_angle = 0.0f;
+    static bool wall_on_right = true;  // Следуем вдоль правой стены
     
-    static float trajectory_phase = 0.0f;
-    trajectory_phase += 0.02f; // Обновляем фазу
+    // Цель - двигаться вперед по оси X
+    const float GOAL_X = 10.0f;  // Условная цель в 10 метрах вперед
+    static float current_x = 0.0f;
     
-    // Простая синусоидальная траектория
-    float vy = 0.1f * std::sin(trajectory_phase);
+    // Простая модель позиции (в реальности нужна одометрия)
+    current_x += config_.base_speed * 0.02f;  // Интегрируем скорость
     
-    return MotorCommand(config_.base_speed, vy, 0);
+    switch (bug_state) {
+        case BugState::GO_TO_GOAL: {
+            // Проверяем, есть ли препятствие на пути к цели
+            bool obstacle_on_path = false;
+            float obstacle_distance = std::numeric_limits<float>::max();
+            
+            // Сканируем передний сектор
+            for (int angle = 350; angle < 360; angle++) {  // 10 градусов прямо
+                if (!std::isnan(last_scan_[angle % 360]) && 
+                    last_scan_[angle % 360] < config_.safety_margin * 2.0f) {
+                    obstacle_on_path = true;
+                    obstacle_distance = std::min(obstacle_distance, last_scan_[angle % 360]);
+                    last_obstacle_angle = angle;
+                }
+            }
+            
+            if (obstacle_on_path) {
+                // Переходим к обходу препятствия
+                bug_state = BugState::FOLLOW_WALL;
+                
+                // Решаем, с какой стороны обходить
+                // Смотрим, с какой стороны больше свободного пространства
+                float right_space = 0.0f, left_space = 0.0f;
+                
+                for (int angle = 270; angle < 360; angle++) {  // Правая сторона
+                    int idx = angle % 360;
+                    if (!std::isnan(last_scan_[idx]) && last_scan_[idx] > config_.safety_margin) {
+                        right_space += last_scan_[idx];
+                    }
+                }
+                
+                for (int angle = 0; angle < 90; angle++) {  // Левая сторона
+                    int idx = angle % 360;
+                    if (!std::isnan(last_scan_[idx]) && last_scan_[idx] > config_.safety_margin) {
+                        left_space += last_scan_[idx];
+                    }
+                }
+                
+                wall_on_right = (right_space >= left_space);
+                
+                RCLCPP_INFO(rclcpp::get_logger("movement"), 
+                           "Obstacle detected at %.2fm. Following %s wall.",
+                           obstacle_distance, wall_on_right ? "right" : "left");
+                
+                // Начинаем с поворота от препятствия
+                return MotorCommand(0, 0, wall_on_right ? -config_.rotation_speed * 0.3f 
+                                                        : config_.rotation_speed * 0.3f);
+            }
+            
+            // Если препятствий нет - двигаемся к цели
+            return MotorCommand(config_.base_speed, 0, 0);
+        }
+        
+        case BugState::FOLLOW_WALL: {
+            // Измеряем дистанцию до стены сбоку
+            float side_distance = std::numeric_limits<float>::max();
+            int side_angle = wall_on_right ? 270 : 90;  // 270 = правая сторона, 90 = левая
+            
+            // Сканируем небольшой сектор сбоку
+            for (int offset = -15; offset <= 15; offset++) {
+                int angle = (side_angle + offset + 360) % 360;
+                if (!std::isnan(last_scan_[angle])) {
+                    side_distance = std::min(side_distance, last_scan_[angle]);
+                }
+            }
+            
+            // Проверяем, можем ли вернуться к движению к цели
+            bool path_to_goal_clear = true;
+            for (int angle = 350; angle < 360; angle++) {
+                if (!std::isnan(last_scan_[angle % 360]) && 
+                    last_scan_[angle % 360] < config_.safety_margin * 1.5f) {
+                    path_to_goal_clear = false;
+                    break;
+                }
+            }
+            
+            // Если путь к цели свободен и мы обошли препятствие
+            if (path_to_goal_clear && 
+                std::abs(current_x - GOAL_X) > 0.5f) {  // Не достигли цели
+                bug_state = BugState::GO_TO_GOAL;
+                RCLCPP_INFO(rclcpp::get_logger("movement"), "Returning to goal direction");
+                return MotorCommand(config_.base_speed * 0.5f, 0, 0);
+            }
+            
+            // Управление для следования вдоль стены
+            float error = side_distance - follow_wall_distance;
+            float angular_z = -error * 0.5f;  // P-регулятор
+            
+            // Если стена справа, инвертируем знак
+            if (wall_on_right) {
+                angular_z = -angular_z;
+            }
+            
+            // Ограничиваем угловую скорость
+            angular_z = std::clamp(angular_z, -config_.rotation_speed * 0.5f, 
+                                               config_.rotation_speed * 0.5f);
+            
+            // Если слишком близко к стене - отодвигаемся
+            float lateral_speed = 0.0f;
+            if (side_distance < config_.safety_margin) {
+                lateral_speed = wall_on_right ? -0.1f : 0.1f;
+            }
+            
+            return MotorCommand(config_.base_speed * 0.7f, lateral_speed, angular_z);
+        }
+    }
+    
+    return MotorCommand(0, 0, 0);
 }
 
 bool Movement::isInFrontSector(int angle, float sector_deg) const {
