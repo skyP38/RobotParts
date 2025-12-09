@@ -30,9 +30,9 @@ struct LidarConfig {
     float max_speed = 0.5f;
     float rotation_speed = 0.5f; // Скорость поворота (рад/с)
     
-    // Смещение лидара относительно центра (м)
-    float lidar_offset_x = 0.1f;  // Вперед от центра
-    float lidar_offset_y = 0.0f;  // Вбок от центра
+    // Параметры алгоритма жука
+    float wall_follow_distance = 0.5f;  // Дистанция следования вдоль стены
+    float goal_distance = 10.0f;        // Целевая дистанция для демо
 };
 
 class Movement {
@@ -47,6 +47,10 @@ public:
     // Основная функция обработки скана
     MotorCommand processScan(const std::vector<float>& ranges, 
                             float current_speed = 0.0f);
+
+    // Установка целевой позиции
+    void setGoal(float x, float y);
+    void setGoalDistance(float distance);
     
     // Сброс состояния
     void reset();
@@ -55,29 +59,32 @@ public:
     LidarPointStatus getPointStatus(float range) const;
     
     // Получить текущее состояние
-    bool isAvoiding() const { return state_ != State::FOLLOWING; }
+    BugState getState() const { return bug_state_; }
     bool isEmergencyStop() const { return emergency_stop_; }
     
 private:
-    enum class State {
-        FOLLOWING,      // Следуем траектории
-        OBSTACLE_DETECTED, // Обнаружено препятствие
-        SIDEWAYS_MOVE,  // Движение вбок
-        ROTATING,       // Поворот для поиска пути
-        WAITING         // Ожидание очистки пути
-    };
+    // enum class State {
+    //     FOLLOWING,      // Следуем траектории
+    //     OBSTACLE_DETECTED, // Обнаружено препятствие
+    //     SIDEWAYS_MOVE,  // Движение вбок
+    //     ROTATING,       // Поворот для поиска пути
+    //     WAITING         // Ожидание очистки пути
+    // };
     
     LidarConfig config_;
-    State state_;
+    BugState bug_state_;
     bool emergency_stop_;
 
-    BugState bug_state_;
-    std::vector<float> last_scan_;  // Для хранения последнего скана
+    // Для отслеживания прогресса
+    float traveled_distance_;
+    float goal_x_, goal_y_;
+    float current_x_, current_y_;
+    float current_orientation_;
     
-    // Для управления состоянием
-    int avoidance_counter_;
-    float target_angle_;
-    float avoidance_direction_; // -1 = влево, 1 = вправо
+    // Для следования вдоль стены
+    bool wall_on_right_;
+    float hit_point_distance_; // Дистанция до цели в точке касания
+    bool can_see_goal_;        // Видна ли цель с текущей позиции
     
     // Обработка скана
     std::vector<LidarPointStatus> analyzeScan(const std::vector<float>& ranges);
@@ -85,11 +92,15 @@ private:
     bool checkForLargeHoles(const std::vector<LidarPointStatus>& statuses);
     float findBestDirection(const std::vector<LidarPointStatus>& statuses);
     
+    // Поведения Bug0
+    MotorCommand behaviorGoToGoal(const std::vector<LidarPointStatus>& statuses);
+    MotorCommand behaviorFollowWall(const std::vector<LidarPointStatus>& statuses);
+
     // Логика состояний
-    MotorCommand handleFollowing(const std::vector<LidarPointStatus>& statuses);
-    MotorCommand handleObstacleDetected(const std::vector<LidarPointStatus>& statuses);
-    MotorCommand handleSidewaysMove(const std::vector<LidarPointStatus>& statuses);
-    MotorCommand handleRotating(const std::vector<LidarPointStatus>& statuses);
+    // MotorCommand handleFollowing(const std::vector<LidarPointStatus>& statuses);
+    // MotorCommand handleObstacleDetected(const std::vector<LidarPointStatus>& statuses);
+    // MotorCommand handleSidewaysMove(const std::vector<LidarPointStatus>& statuses);
+    // MotorCommand handleRotating(const std::vector<LidarPointStatus>& statuses);
     
     // Вспомогательные функции
     bool isInFrontSector(int angle, float sector_deg = 60.0f) const;
@@ -98,7 +109,14 @@ private:
     float radianToDegree(float rad) const;
     
     // Генерация траектории (простая версия)
-    MotorCommand generateTrajectoryCommand();
+    // MotorCommand generateTrajectoryCommand();
+
+        // Для следования вдоль стены
+    float getSideDistance(const std::vector<float>& ranges, bool right_side) const;
+    float getFrontDistance(const std::vector<float>& ranges) const;
+    
+    // Обновление позиции (упрощенное, без одометрии)
+    void updatePosition(float linear_speed, float angular_speed, float dt);
 };
 
 #endif
