@@ -73,40 +73,69 @@ void STM32Interface::disconnect() {
 }
 
 std::vector<uint8_t> STM32Interface::encodeCommand(const MotorCommand& cmd) {
-    std::vector<uint8_t> packet(13);
+    std::vector<uint8_t> packet(11); // 2 заголовок + 1 длина + 1 команда + 8 данных + 1 CRC
     
-    // Заголовок
     packet[0] = 0xAA;  // Start byte 1
     packet[1] = 0x55;  // Start byte 2
-    packet[2] = 0x08;  // Длина данных
+    packet[2] = 0x08;  // Длина данных (8 байт)
+    packet[3] = 0x01;  // Команда движения
+
+    // Linear and angular speed (float, little-endian)
+    float linear = std::clamp(cmd.speed, -config_.max_speed, config_.max_speed);
+    float angular = std::clamp(cmd.omega, -config_.rotation_speed, config_.rotation_speed);
     
-    // Команда: движение (0x01)
-    packet[3] = 0x01;
-    
-    // Данные: vx, vy, omega (float, little-endian)
-    float vx = std::clamp(cmd.vx, -2.0f, 2.0f);
-    float vy = std::clamp(cmd.vy, -2.0f, 2.0f);
-    float omega = std::clamp(cmd.omega, -3.14f, 3.14f);
-    
-    uint8_t* vx_bytes = reinterpret_cast<uint8_t*>(&vx);
-    uint8_t* vy_bytes = reinterpret_cast<uint8_t*>(&vy);
-    uint8_t* omega_bytes = reinterpret_cast<uint8_t*>(&omega);
+    // V и Ω (float, little-endian)
+    uint8_t* v_bytes = reinterpret_cast<uint8_t*>(&linear);
+    uint8_t* omega_bytes = reinterpret_cast<uint8_t*>(&angular);
     
     for (int i = 0; i < 4; i++) {
-        packet[4 + i] = vx_bytes[i];
-        packet[8 + i] = vy_bytes[i];
-        packet[12 + i] = omega_bytes[i];
+        packet[4 + i] = v_bytes[i];     // линейная скорость
+        packet[8 + i] = omega_bytes[i]; // угловая скорость
     }
     
-    // Контрольная сумма (XOR всех байт, кроме заголовка)
+    // CRC
     uint8_t checksum = 0;
-    for (size_t i = 2; i < packet.size(); i++) {
-        checksum ^= packet[i];
-    }
+    for (size_t i = 2; i < packet.size(); i++) checksum ^= packet[i];
     packet.push_back(checksum);
     
     return packet;
 }
+
+// std::vector<uint8_t> STM32Interface::encodeCommand(const MotorCommand& cmd) {
+//     std::vector<uint8_t> packet(13);
+    
+//     // Заголовок
+//     packet[0] = 0xAA;  // Start byte 1
+//     packet[1] = 0x55;  // Start byte 2
+//     packet[2] = 0x08;  // Длина данных
+    
+//     // Команда: движение (0x01)
+//     packet[3] = 0x01;
+    
+//     // Данные: vx, vy, omega (float, little-endian)
+//     float vx = std::clamp(cmd.vx, -2.0f, 2.0f);
+//     float м = std::clamp(cmd.vy, -2.0f, 2.0f);
+//     float omega = std::clamp(cmd.omega, -3.14f, 3.14f);
+    
+//     uint8_t* vx_bytes = reinterpret_cast<uint8_t*>(&vx);
+//     uint8_t* vy_bytes = reinterpret_cast<uint8_t*>(&vy);
+//     uint8_t* omega_bytes = reinterpret_cast<uint8_t*>(&omega);
+    
+//     for (int i = 0; i < 4; i++) {
+//         packet[4 + i] = vx_bytes[i];
+//         packet[8 + i] = vy_bytes[i];
+//         packet[12 + i] = omega_bytes[i];
+//     }
+    
+//     // Контрольная сумма (XOR всех байт, кроме заголовка)
+//     uint8_t checksum = 0;
+//     for (size_t i = 2; i < packet.size(); i++) {
+//         checksum ^= packet[i];
+//     }
+//     packet.push_back(checksum);
+    
+//     return packet;
+// }
 
 bool STM32Interface::sendPacket(const std::vector<uint8_t>& data) {
     if (fd_ < 0) {

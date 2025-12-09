@@ -1,18 +1,16 @@
 #ifndef STM32_INTERFACE_H
 #define STM32_INTERFACE_H
 
-#include <rclcpp/rclcpp/rclcpp.hpp>
-// #include "rclcpp/rclcpp.hpp"
+#include "rclcpp/rclcpp.hpp"
 #include <string>
 #include <vector>
 
 struct MotorCommand {
-    float vx;          // линейная скорость по X (м/с)
-    float vy;          // линейная скорость по Y (м/с)
-    float omega;       // угловая скорость (рад/с)
+    float speed;          // линейная скорость вперед(+)/назад(-)
+    float omega;       // угловая скорость (рад)
     
-    MotorCommand(float vx = 0, float vy = 0, float omega = 0) 
-        : vx(vx), vy(vy), omega(omega) {}
+    MotorCommand(float speed = 0, float omega = 0) 
+        : speed(speed), omega(omega) {}
 };
 
 class STM32Interface {

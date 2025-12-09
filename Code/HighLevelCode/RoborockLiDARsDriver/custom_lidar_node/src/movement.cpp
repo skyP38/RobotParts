@@ -10,10 +10,26 @@ Movement::Movement(const LidarConfig& config)
     , avoidance_direction_(1.0f) {
 }
 
+void Movement::setGoal(float x, float y) {
+    goal_x_ = x;
+    goal_y_ = y;
+    reset();
+}
+
+void Movement::setGoalDistance(float distance) {
+    goal_x_ = distance;
+    goal_y_ = 0.0f;
+    reset();
+}
+
 void Movement::reset() {
-    state_ = State::FOLLOWING;
+    bug_state_ = BugState::GO_TO_GOAL;
     emergency_stop_ = false;
-    avoidance_counter_ = 0;
+    traveled_distance_ = 0.0f;
+    current_x_ = 0.0f;
+    current_y_ = 0.0f;
+    current_orientation_ = 0.0f;
+    can_see_goal_ = true;
 }
 
 LidarPointStatus Movement::getPointStatus(float range) const {
@@ -34,150 +50,56 @@ std::vector<LidarPointStatus> Movement::analyzeScan(const std::vector<float>& ra
     std::vector<LidarPointStatus> statuses(360, LidarPointStatus::INVALID);
     
     for (int i = 0; i < 360; i++) {
-        // Игнорируем сектор, закрытый корпусом
         if (isBodyBlockedAngle(i)) {
             statuses[i] = LidarPointStatus::INVALID;
             continue;
         }
-        
         statuses[i] = getPointStatus(ranges[i]);
-    }
-    
-    // Заполнение мелких дыр (< 5 градусов)
-    for (int i = 0; i < 360; i++) {
-        if (statuses[i] == LidarPointStatus::INVALID) {
-            // Проверяем окрестность
-            bool has_valid_neighbor = false;
-            int hole_size = 0;
-            
-            // Ищем размер дыры
-            for (int j = 1; j <= 5; j++) {
-                int idx_prev = (i - j + 360) % 360;
-                int idx_next = (i + j) % 360;
-                
-                if (statuses[idx_prev] != LidarPointStatus::INVALID || 
-                    statuses[idx_next] != LidarPointStatus::INVALID) {
-                    has_valid_neighbor = true;
-                }
-                
-                if (statuses[idx_prev] == LidarPointStatus::INVALID || 
-                    statuses[idx_next] == LidarPointStatus::INVALID) {
-                    hole_size++;
-                }
-            }
-            
-            // Заполняем мелкие дыры статусом TOO_FAR
-            if (has_valid_neighbor && hole_size < 5) {
-                statuses[i] = LidarPointStatus::TOO_FAR;
-            }
-        }
     }
     
     return statuses;
 }
 
-bool Movement::checkForObstacles(const std::vector<LidarPointStatus>& statuses) {
-    // Проверяем передний сектор на препятствия
-    for (int angle = 0; angle < 360; angle++) {
-        if (isInFrontSector(angle, 45.0f) && !isBodyBlockedAngle(angle)) {
+bool Movement::checkForObstacleInGoalDirection(const std::vector<LidarPointStatus>& statuses) {
+    // Получаем угол к цели
+    float goal_angle_deg = radianToDegree(getGoalDirectionAngle());
+    if (goal_angle_deg < 0) goal_angle_deg += 360.0f;
+    
+    int goal_angle_idx = static_cast<int>(goal_angle_deg) % 360;
+    
+    // Проверяем узкий сектор (±15°) в направлении цели
+    for (int offset = -15; offset <= 15; offset++) {
+        int angle = (goal_angle_idx + offset + 360) % 360;
+        
+        if (!isBodyBlockedAngle(angle)) {
             if (statuses[angle] == LidarPointStatus::TOO_NEAR) {
-                return true;
+                return true;  // Препятствие слишком близко
             }
             
+            // Для VALID точек нужно проверить расстояние
+            // (В реальности нужно передавать ranges, но упрощаем)
             if (statuses[angle] == LidarPointStatus::VALID) {
-                // TODO добавить проверку расстояния
-                return true;
+                return true;  // Есть препятствие в направлении цели
             }
         }
     }
+    
     return false;
 }
 
-bool Movement::checkForLargeHoles(const std::vector<LidarPointStatus>& statuses) {
-    int hole_count = 0;
-    int max_hole_size = 0;
-    int current_hole = 0;
-    
-    for (int angle = 0; angle < 360; angle++) {
-        if (isInFrontSector(angle, 60.0f) && !isBodyBlockedAngle(angle)) {
-            if (statuses[angle] == LidarPointStatus::INVALID) {
-                current_hole++;
-                hole_count++;
-            } else {
-                if (current_hole > max_hole_size) {
-                    max_hole_size = current_hole;
-                }
-                current_hole = 0;
-            }
-        }
-    }
-    
-    // Проверяем максимальный размер дыры
-    if (current_hole > max_hole_size) {
-        max_hole_size = current_hole;
-    }
-    
-    // Если дыра больше порога - считаем опасной
-    return (max_hole_size * 1.0f) > config_.hole_threshold_deg;
+
+bool Movement::canReachGoalDirectly(const std::vector<LidarPointStatus>& statuses) {
+    // Проверяем, нет ли препятствий между роботом и целью
+    return !checkForObstacleInGoalDirection(statuses);
 }
 
-float Movement::findBestDirection(const std::vector<LidarPointStatus>& statuses) {
-    // Ищем наиболее свободное направление
-    std::vector<float> sector_scores;
-    
-    // Разбиваем на 8 секторов по 45 градусов
-    for (int sector = 0; sector < 8; sector++) {
-        float score = 0.0f;
-        int count = 0;
-        
-        for (int angle = sector * 45; angle < (sector + 1) * 45; angle++) {
-            int idx = angle % 360;
-            
-            if (!isBodyBlockedAngle(idx)) {
-                switch (statuses[idx]) {
-                    case LidarPointStatus::TOO_FAR:
-                        score += 2.0f;
-                        break;
-                    case LidarPointStatus::VALID:
-                        // Учитываем расстояние - чем дальше, тем лучше
-                        // score += ranges[idx] / config_.max_range;
-                        score += 1.0f;
-                        break;
-                    case LidarPointStatus::TOO_NEAR:
-                        score -= 5.0f;
-                        break;
-                    case LidarPointStatus::INVALID:
-                        score -= 3.0f;
-                        break;
-                }
-                count++;
-            }
-        }
-        
-        if (count > 0) {
-            sector_scores.push_back(score / count);
-        } else {
-            sector_scores.push_back(-10.0f); // Сектор заблокирован
-        }
-    }
-    
-    // Находим лучший сектор
-    int best_sector = 0;
-    float best_score = sector_scores[0];
-    
-    for (int i = 1; i < 8; i++) {
-        if (sector_scores[i] > best_score) {
-            best_score = sector_scores[i];
-            best_sector = i;
-        }
-    }
-    
-    // Преобразуем сектор в угол (в радианах)
-    float best_angle_deg = best_sector * 45.0f;
-    return degreeToRadian(best_angle_deg);
+float Movement::getGoalDirectionAngle() const {
+    float dx = goal_x_ - current_x_;
+    float dy = goal_y_ - current_y_;
+    return atan2(dy, dx);
 }
 
-MotorCommand Movement::processScan(const std::vector<float>& ranges, float current_speed) {
+MotorCommand Movement::processScan(const std::vector<float>& ranges) {
     auto statuses = analyzeScan(ranges);
     
     // Проверка на экстренную остановку
@@ -186,280 +108,151 @@ MotorCommand Movement::processScan(const std::vector<float>& ranges, float curre
         if (isInFrontSector(angle, 30.0f) && !isBodyBlockedAngle(angle)) {
             if (statuses[angle] == LidarPointStatus::TOO_NEAR) {
                 emergency_stop_ = true;
-                state_ = State::FOLLOWING;
-                avoidance_counter_ = 0;
-                return MotorCommand(0, 0, 0); // Полная остановка
+                RCLCPP_WARN(rclcpp::get_logger("movement"), "Emergency stop!");
+                return MotorCommand(0, 0);
             }
         }
     }
     
-    // Логика состояний
-    switch (state_) {
-        case State::FOLLOWING:
-            return handleFollowing(statuses);
-        case State::OBSTACLE_DETECTED:
-            return handleObstacleDetected(statuses);
-        case State::SIDEWAYS_MOVE:
-            return handleSidewaysMove(statuses);
-        case State::ROTATING:
-            return handleRotating(statuses);
-        case State::WAITING:
-            // Просто стоп
-            avoidance_counter_++;
-            if (avoidance_counter_ > 50) { // ~1 секунда
-                state_ = State::FOLLOWING;
-                avoidance_counter_ = 0;
-            }
-            return MotorCommand(0, 0, 0);
+    // Основная логика Bug0
+    switch (bug_state_) {
+        case BugState::GO_TO_GOAL:
+            return behaviorGoToGoal(statuses);
+        case BugState::FOLLOW_WALL:
+            return behaviorFollowWall(statuses);
     }
     
-    return MotorCommand(0, 0, 0);
+    return MotorCommand(0, 0);
 }
 
-MotorCommand Movement::handleFollowing(const std::vector<LidarPointStatus>& statuses) {
-    // Проверяем наличие препятствий
-    bool obstacle = checkForObstacles(statuses);
-    bool large_hole = checkForLargeHoles(statuses);
+MotorCommand Movement::behaviorFollowWall(const std::vector<LidarPointStatus>& statuses) {
+    // 1. Проверяем, можем ли вернуться к движению к цели
+    float distance_to_goal = sqrt(pow(goal_x_ - current_x_, 2) + pow(goal_y_ - current_y_, 2));
     
-    if (obstacle || large_hole) {
-        state_ = State::OBSTACLE_DETECTED;
-        avoidance_counter_ = 0;
+    // Условие возврата к цели по Bug0:
+    // 1) Робот ближе к цели, чем в точке касания
+    // 2) Нет препятствий между роботом и целью
+    if (distance_to_goal < hit_point_distance_ && canReachGoalDirectly(statuses)) {
+        bug_state_ = BugState::GO_TO_GOAL;
+        RCLCPP_INFO(rclcpp::get_logger("movement"), 
+                   "Returning to goal. Current distance: %.2f, Hit point: %.2f",
+                   distance_to_goal, hit_point_distance_);
+        return MotorCommand(0, 0); // На секунду остановимся
+    }
+    
+    // 2. Следуем вдоль стены
+    // Измеряем дистанцию до стены сбоку
+    float side_distance = getSideDistance(statuses, wall_on_right_);
+    
+    // Желаемая дистанция до стены
+    float desired_distance = config_.safety_margin * 2.0f;
+    float error = side_distance - desired_distance;
+    
+    // Пропорциональное управление для следования вдоль стены
+    float angular_speed = -error * 1.0f;  // P-регулятор
+    if (wall_on_right_) {
+        angular_speed = -angular_speed;  // Инвертируем для правой стены
+    }
+    
+    // Ограничиваем угловую скорость
+    angular_speed = std::clamp(angular_speed, 
+                              -config_.rotation_speed * 0.8f, 
+                              config_.rotation_speed * 0.8f);
+    
+    // Проверяем, нет ли препятствия впереди
+    float front_distance = getFrontDistance(statuses);
+    float linear_speed = config_.base_speed * 0.7f;
+    
+    if (front_distance < config_.safety_margin * 3.0f) {
+        // Если впереди близко, замедляемся
+        linear_speed *= front_distance / (config_.safety_margin * 3.0f);
         
-        // Определяем направление для объезда
-        target_angle_ = findBestDirection(statuses);
-        
-        // Решаем, в какую сторону двигаться
-        if (target_angle_ > degreeToRadian(180.0f)) {
-            avoidance_direction_ = -1.0f; // Влево
+        // И немного поворачиваем от стены
+        if (wall_on_right_) {
+            angular_speed += config_.rotation_speed * 0.3f;
         } else {
-            avoidance_direction_ = 1.0f; // Вправо
+            angular_speed -= config_.rotation_speed * 0.3f;
         }
-        
-        return MotorCommand(0, 0, 0); // Сначала остановимся
     }
     
-    // Если препятствий нет - следуем траектории
-    return generateTrajectoryCommand();
+    return MotorCommand(linear_speed, angular_speed);
 }
 
-MotorCommand Movement::handleObstacleDetected(const std::vector<LidarPointStatus>& statuses) {
-    avoidance_counter_++;
+float Movement::getSideDistance(const std::vector<LidarPointStatus>& statuses, bool right_side) const {
+    int start_angle = right_side ? 270 : 90;
+    int end_angle = right_side ? 360 : 90;
     
-    if (avoidance_counter_ < 10) {
-        // Пауза перед началом маневра
-        return MotorCommand(0, 0, 0);
-    }
+    float min_distance = config_.max_range;
+    int count = 0;
     
-    // Начинаем движение вбок
-    state_ = State::SIDEWAYS_MOVE;
-    avoidance_counter_ = 0;
-    
-    return MotorCommand(0, avoidance_direction_ * config_.base_speed * 0.5f, 0);
-}
-
-MotorCommand Movement::handleSidewaysMove(const std::vector<LidarPointStatus>& statuses) {
-    avoidance_counter_++;
-    
-    // Двигаемся вбок 1 секунду (~50 циклов при 50Hz)
-    if (avoidance_counter_ < 50) {
-        return MotorCommand(0, avoidance_direction_ * config_.base_speed * 0.5f, 0);
-    }
-    
-    // Проверяем, свободен ли путь
-    bool front_clear = true;
-    for (int angle = 0; angle < 360; angle++) {
-        if (isInFrontSector(angle, 45.0f) && !isBodyBlockedAngle(angle)) {
-            if (statuses[angle] == LidarPointStatus::TOO_NEAR) {
-                front_clear = false;
-                break;
+    for (int angle = start_angle; angle < end_angle; angle++) {
+        if (!isBodyBlockedAngle(angle)) {
+            if (statuses[angle] == LidarPointStatus::VALID) {
+                // В реальности нужно использовать ranges, но упрощаем
+                min_distance = std::min(min_distance, config_.safety_margin * 2.0f);
+                count++;
+            } else if (statuses[angle] == LidarPointStatus::TOO_NEAR) {
+                min_distance = config_.min_range;
+                count++;
             }
         }
     }
     
-    if (front_clear) {
-        // Путь свободен - возвращаемся к траектории
-        state_ = State::FOLLOWING;
-        avoidance_counter_ = 0;
-        return generateTrajectoryCommand();
-    } else {
-        // Путь все еще заблокирован - пробуем повернуть
-        state_ = State::ROTATING;
-        avoidance_counter_ = 0;
-        return MotorCommand(0, 0, avoidance_direction_ * config_.rotation_speed * 0.5f);
-    }
-}
-
-MotorCommand Movement::handleRotating(const std::vector<LidarPointStatus>& statuses) {
-    avoidance_counter_++;
-    
-    if (avoidance_counter_ < 30) {
-        // Поворачиваем 0.6 секунды
-        return MotorCommand(0, 0, avoidance_direction_ * config_.rotation_speed * 0.5f);
+    if (count == 0) {
+        return config_.max_range;  // Нет данных
     }
     
-    // После поворота проверяем снова
-    state_ = State::FOLLOWING;
-    avoidance_counter_ = 0;
-    
-    return generateTrajectoryCommand();
+    return min_distance;
 }
 
-// MotorCommand Movement::generateTrajectoryCommand() {
-//     // Простая траектория - движение вперед
-//     //  TODO: алгоритм жука
-    
-//     static float trajectory_phase = 0.0f;
-//     trajectory_phase += 0.02f; // Обновляем фазу
-    
-//     // Простая синусоидальная траектория
-//     float vy = 0.1f * std::sin(trajectory_phase);
-    
-//     return MotorCommand(config_.base_speed, vy, 0);
-// }
 
-MotorCommand Movement::generateTrajectoryCommand() {
-    // Алгоритм жука - следование границе препятствия
-    static BugState bug_state = BugState::GO_TO_GOAL;
-    static float follow_wall_distance = 0.5f;  // Дистанция следования вдоль стены
-    static float last_obstacle_angle = 0.0f;
-    static bool wall_on_right = true;  // Следуем вдоль правой стены
+float Movement::getFrontDistance(const std::vector<LidarPointStatus>& statuses) const {
+    float min_distance = config_.max_range;
     
-    // Цель - двигаться вперед по оси X
-    const float GOAL_X = 10.0f;  // Условная цель в 10 метрах вперед
-    static float current_x = 0.0f;
-    
-    // Простая модель позиции (в реальности нужна одометрия)
-    current_x += config_.base_speed * 0.02f;  // Интегрируем скорость
-    
-    switch (bug_state) {
-        case BugState::GO_TO_GOAL: {
-            // Проверяем, есть ли препятствие на пути к цели
-            bool obstacle_on_path = false;
-            float obstacle_distance = std::numeric_limits<float>::max();
-            
-            // Сканируем передний сектор
-            for (int angle = 350; angle < 360; angle++) {  // 10 градусов прямо
-                if (!std::isnan(last_scan_[angle % 360]) && 
-                    last_scan_[angle % 360] < config_.safety_margin * 2.0f) {
-                    obstacle_on_path = true;
-                    obstacle_distance = std::min(obstacle_distance, last_scan_[angle % 360]);
-                    last_obstacle_angle = angle;
-                }
+    for (int angle = 350; angle < 360; angle++) {
+        if (!isBodyBlockedAngle(angle % 360)) {
+            if (statuses[angle % 360] == LidarPointStatus::VALID) {
+                min_distance = std::min(min_distance, config_.safety_margin * 2.0f);
+            } else if (statuses[angle % 360] == LidarPointStatus::TOO_NEAR) {
+                min_distance = config_.min_range;
             }
-            
-            if (obstacle_on_path) {
-                // Переходим к обходу препятствия
-                bug_state = BugState::FOLLOW_WALL;
-                
-                // Решаем, с какой стороны обходить
-                // Смотрим, с какой стороны больше свободного пространства
-                float right_space = 0.0f, left_space = 0.0f;
-                
-                for (int angle = 270; angle < 360; angle++) {  // Правая сторона
-                    int idx = angle % 360;
-                    if (!std::isnan(last_scan_[idx]) && last_scan_[idx] > config_.safety_margin) {
-                        right_space += last_scan_[idx];
-                    }
-                }
-                
-                for (int angle = 0; angle < 90; angle++) {  // Левая сторона
-                    int idx = angle % 360;
-                    if (!std::isnan(last_scan_[idx]) && last_scan_[idx] > config_.safety_margin) {
-                        left_space += last_scan_[idx];
-                    }
-                }
-                
-                wall_on_right = (right_space >= left_space);
-                
-                RCLCPP_INFO(rclcpp::get_logger("movement"), 
-                           "Obstacle detected at %.2fm. Following %s wall.",
-                           obstacle_distance, wall_on_right ? "right" : "left");
-                
-                // Начинаем с поворота от препятствия
-                return MotorCommand(0, 0, wall_on_right ? -config_.rotation_speed * 0.3f 
-                                                        : config_.rotation_speed * 0.3f);
-            }
-            
-            // Если препятствий нет - двигаемся к цели
-            return MotorCommand(config_.base_speed, 0, 0);
-        }
-        
-        case BugState::FOLLOW_WALL: {
-            // Измеряем дистанцию до стены сбоку
-            float side_distance = std::numeric_limits<float>::max();
-            int side_angle = wall_on_right ? 270 : 90;  // 270 = правая сторона, 90 = левая
-            
-            // Сканируем небольшой сектор сбоку
-            for (int offset = -15; offset <= 15; offset++) {
-                int angle = (side_angle + offset + 360) % 360;
-                if (!std::isnan(last_scan_[angle])) {
-                    side_distance = std::min(side_distance, last_scan_[angle]);
-                }
-            }
-            
-            // Проверяем, можем ли вернуться к движению к цели
-            bool path_to_goal_clear = true;
-            for (int angle = 350; angle < 360; angle++) {
-                if (!std::isnan(last_scan_[angle % 360]) && 
-                    last_scan_[angle % 360] < config_.safety_margin * 1.5f) {
-                    path_to_goal_clear = false;
-                    break;
-                }
-            }
-            
-            // Если путь к цели свободен и мы обошли препятствие
-            if (path_to_goal_clear && 
-                std::abs(current_x - GOAL_X) > 0.5f) {  // Не достигли цели
-                bug_state = BugState::GO_TO_GOAL;
-                RCLCPP_INFO(rclcpp::get_logger("movement"), "Returning to goal direction");
-                return MotorCommand(config_.base_speed * 0.5f, 0, 0);
-            }
-            
-            // Управление для следования вдоль стены
-            float error = side_distance - follow_wall_distance;
-            float angular_z = -error * 0.5f;  // P-регулятор
-            
-            // Если стена справа, инвертируем знак
-            if (wall_on_right) {
-                angular_z = -angular_z;
-            }
-            
-            // Ограничиваем угловую скорость
-            angular_z = std::clamp(angular_z, -config_.rotation_speed * 0.5f, 
-                                               config_.rotation_speed * 0.5f);
-            
-            // Если слишком близко к стене - отодвигаемся
-            float lateral_speed = 0.0f;
-            if (side_distance < config_.safety_margin) {
-                lateral_speed = wall_on_right ? -0.1f : 0.1f;
-            }
-            
-            return MotorCommand(config_.base_speed * 0.7f, lateral_speed, angular_z);
         }
     }
     
-    return MotorCommand(0, 0, 0);
+    return min_distance;
+}
+
+void Movement::updatePosition(float linear_speed, float angular_speed, float dt) {
+    // Упрощенное обновление позиции (без учета скольжения)
+    current_orientation_ += angular_speed * dt;
+    
+    // Нормализуем ориентацию
+    while (current_orientation_ > M_PI) current_orientation_ -= 2 * M_PI;
+    while (current_orientation_ < -M_PI) current_orientation_ += 2 * M_PI;
+    
+    // Обновляем позицию
+    current_x_ += linear_speed * cos(current_orientation_) * dt;
+    current_y_ += linear_speed * sin(current_orientation_) * dt;
+    
+    traveled_distance_ += fabs(linear_speed) * dt;
 }
 
 bool Movement::isInFrontSector(int angle, float sector_deg) const {
     float half_sector = sector_deg / 2.0f;
+    float angle_deg = static_cast<float>(angle);
     
-    // Передний сектор вокруг 0/360 градусов
-    float angle_deg = angle;
-    
-    return (angle_deg <= half_sector) || (angle_deg >= (360.0f - half_sector)) ||
-           (std::abs(angle_deg - 360.0f) <= half_sector);
+    return (angle_deg <= half_sector) || (angle_deg >= (360.0f - half_sector));
 }
 
 bool Movement::isBodyBlockedAngle(int angle) const {
-    float angle_deg = angle;
+    float angle_deg = static_cast<float>(angle);
     
-    // Проверяем, попадает ли угол в заблокированный сектор
     if (config_.body_block_start < config_.body_block_end) {
-        return (angle_deg >= config_.body_block_start && angle_deg <= config_.body_block_end);
+        return (angle_deg >= config_.body_block_start && 
+                angle_deg <= config_.body_block_end);
     } else {
-        // Если сектор пересекает 0/360 градусов
-        return (angle_deg >= config_.body_block_start || angle_deg <= config_.body_block_end);
+        return (angle_deg >= config_.body_block_start || 
+                angle_deg <= config_.body_block_end);
     }
 }
 

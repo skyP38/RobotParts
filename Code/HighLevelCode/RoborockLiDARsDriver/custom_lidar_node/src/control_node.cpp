@@ -92,28 +92,32 @@ private:
             }
         }
         
-        // Публикация для визуализации
-        auto twist_msg = geometry_msgs::msg::Twist();
-        twist_msg.linear.x = cmd.vx;
-        twist_msg.linear.y = cmd.vy;
-        twist_msg.angular.z = cmd.omega;
-        cmd_pub_->publish(twist_msg);
-        
         // Логирование
         static int log_counter = 0;
         if (log_counter++ % 25 == 0) {
             std::string state_str;
+            auto state = movement_->getState();
+            
+            if (state == Movement::BugState::GO_TO_GOAL) {
+                state_str = "GO_TO_GOAL";
+            } else {
+                state_str = "FOLLOW_WALL";
+            }
+            
             if (movement_->isEmergencyStop()) {
                 state_str = "EMERGENCY_STOP";
-            } else if (movement_->isAvoiding()) {
-                state_str = "AVOIDING";
-            } else {
-                state_str = "FOLLOWING";
             }
             
             RCLCPP_INFO(this->get_logger(), 
-                       "State: %s, Cmd: vx=%.2f, vy=%.2f, omega=%.2f",
-                       state_str.c_str(), cmd.vx, cmd.vy, cmd.omega);
+                       "State: %s, Cmd: speed=%.2f, omega=%.2f",
+                       state_str.c_str(), cmd.speed, cmd.omega);
+        }
+
+        // Отправка команды на STM32
+        if (stm32_interface_->isConnected()) {
+            if (!stm32_interface_->sendCommand(cmd)) {
+                RCLCPP_WARN(this->get_logger(), "Failed to send command to STM32");
+            }
         }
     }
     
