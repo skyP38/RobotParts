@@ -98,14 +98,10 @@ private:
             std::string state_str;
             auto state = movement_->getState();
             
-            if (state == Movement::BugState::GO_TO_GOAL) {
-                state_str = "GO_TO_GOAL";
+            if (state == Movement::State::EXPLORE) {
+                state_str = "EXPLORE";
             } else {
-                state_str = "FOLLOW_WALL";
-            }
-            
-            if (movement_->isEmergencyStop()) {
-                state_str = "EMERGENCY_STOP";
+                state_str = "not EXPLORE";
             }
             
             RCLCPP_INFO(this->get_logger(), 
